@@ -1,0 +1,250 @@
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["multiSchema"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+  schemas  = ["public", "production", "inventory", "orders"]
+}
+
+// ─────────────────────────────────────────────
+// PUBLIC SCHEMA
+// ─────────────────────────────────────────────
+
+enum Role {
+  owner
+  viewer
+
+  @@schema("public")
+}
+
+model User {
+  id           String   @id @default(uuid()) @db.Uuid
+  name         String   @db.VarChar(255)
+  email        String   @unique @db.VarChar(255)
+  passwordHash String   @map("password_hash") @db.VarChar(255)
+  role         Role     @default(viewer)
+  active       Boolean  @default(true)
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt    DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  // Relations
+  createdJobs    Job[]            @relation("JobCreatedBy")
+  loggedRuns     ProductionRun[]  @relation("RunLoggedBy")
+  recordedMoves  StockMovement[]  @relation("MovementRecordedBy")
+  createdOrders  Order[]          @relation("OrderCreatedBy")
+
+  @@map("users")
+  @@schema("public")
+}
+
+// Session table for connect-pg-simple
+model Session {
+  sid    String   @id @db.VarChar(255)
+  sess   Json
+  expire DateTime @db.Timestamptz
+
+  @@index([expire], name: "IDX_session_expire")
+  @@map("session")
+  @@schema("public")
+}
+
+// ─────────────────────────────────────────────
+// PRODUCTION SCHEMA
+// ─────────────────────────────────────────────
+
+enum JobStatus {
+  Pending       @map("Pending")
+  InProgress    @map("In Progress")
+  OnHold        @map("On Hold")
+  Completed     @map("Completed")
+  Cancelled     @map("Cancelled")
+
+  @@schema("production")
+}
+
+model Job {
+  id                   String    @id @default(uuid()) @db.Uuid
+  description          String    @db.Text
+  targetQuantity       Int       @map("target_quantity")
+  status               JobStatus @default(Pending)
+  version              Int       @default(1)
+  targetCompletionDate DateTime  @map("target_completion_date") @db.Date
+  orderId              String?   @map("order_id") @db.Uuid
+  finishedGoodId       String?   @map("finished_good_id") @db.Uuid
+  createdBy            String    @map("created_by") @db.Uuid
+  createdAt            DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt            DateTime  @updatedAt @map("updated_at") @db.Timestamptz
+
+  // Relations
+  order          Order?          @relation(fields: [orderId], references: [id])
+  finishedGood   InventoryItem?  @relation("JobFinishedGood", fields: [finishedGoodId], references: [id])
+  creator        User            @relation("JobCreatedBy", fields: [createdBy], references: [id])
+  productionRuns ProductionRun[]
+
+  @@index([status])
+  @@index([orderId])
+  @@index([createdAt])
+  @@map("jobs")
+  @@schema("production")
+}
+
+model ProductionRun {
+  id               String   @id @default(uuid()) @db.Uuid
+  jobId            String   @map("job_id") @db.Uuid
+  loggedBy         String   @map("logged_by") @db.Uuid
+  quantityProduced Int      @map("quantity_produced")
+  runDate          DateTime @default(now()) @map("run_date") @db.Timestamptz
+  createdAt        DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  // Relations
+  job       Job                    @relation(fields: [jobId], references: [id])
+  logger    User                   @relation("RunLoggedBy", fields: [loggedBy], references: [id])
+  materials ProductionRunMaterial[]
+
+  @@index([jobId])
+  @@map("production_runs")
+  @@schema("production")
+}
+
+model ProductionRunMaterial {
+  id               String  @id @default(uuid()) @db.Uuid
+  productionRunId  String  @map("production_run_id") @db.Uuid
+  itemId           String  @map("item_id") @db.Uuid
+  quantityConsumed Decimal @map("quantity_consumed") @db.Decimal(12, 4)
+
+  // Relations
+  productionRun ProductionRun @relation(fields: [productionRunId], references: [id])
+  item          InventoryItem @relation(fields: [itemId], references: [id])
+
+  @@map("production_run_materials")
+  @@schema("production")
+}
+
+// ─────────────────────────────────────────────
+// INVENTORY SCHEMA
+// ─────────────────────────────────────────────
+
+enum ItemType {
+  raw_material
+  finished_good
+
+  @@schema("inventory")
+}
+
+enum MovementType {
+  receipt
+  consumption
+  adjustment
+  shipment
+
+  @@schema("inventory")
+}
+
+model InventoryItem {
+  id                String   @id @default(uuid()) @db.Uuid
+  name              String   @db.VarChar(255)
+  itemType          ItemType @map("item_type")
+  unitOfMeasure     String   @map("unit_of_measure") @db.VarChar(100)
+  lowStockThreshold Decimal  @default(0) @map("low_stock_threshold") @db.Decimal(12, 4)
+  createdAt         DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt         DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  // Relations
+  stockMovements         StockMovement[]
+  productionRunMaterials ProductionRunMaterial[]
+  jobsAsFinishedGood     Job[]                  @relation("JobFinishedGood")
+  orderLineItems         OrderLineItem[]
+
+  @@map("inventory_items")
+  @@schema("inventory")
+}
+
+model StockMovement {
+  id            String       @id @default(uuid()) @db.Uuid
+  itemId        String       @map("item_id") @db.Uuid
+  recordedBy    String       @map("recorded_by") @db.Uuid
+  movementType  MovementType @map("movement_type")
+  quantity      Decimal      @db.Decimal(12, 4)
+  referenceType String?      @map("reference_type") @db.VarChar(50)
+  referenceId   String?      @map("reference_id") @db.Uuid
+  notes         String?      @db.Text
+  recordedAt    DateTime     @default(now()) @map("recorded_at") @db.Timestamptz
+
+  // Relations
+  item     InventoryItem @relation(fields: [itemId], references: [id])
+  recorder User          @relation("MovementRecordedBy", fields: [recordedBy], references: [id])
+
+  @@index([itemId])
+  @@index([recordedAt])
+  @@index([movementType])
+  @@map("stock_movements")
+  @@schema("inventory")
+}
+
+// ─────────────────────────────────────────────
+// ORDERS SCHEMA
+// ─────────────────────────────────────────────
+
+enum OrderStatus {
+  Received          @map("Received")
+  InProduction      @map("In Production")
+  ReadyForDelivery  @map("Ready for Delivery")
+  Fulfilled         @map("Fulfilled")
+  Cancelled         @map("Cancelled")
+
+  @@schema("orders")
+}
+
+model Customer {
+  id          String   @id @default(uuid()) @db.Uuid
+  name        String   @db.VarChar(255)
+  contactInfo String?  @map("contact_info") @db.Text
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  // Relations
+  orders Order[]
+
+  @@map("customers")
+  @@schema("orders")
+}
+
+model Order {
+  id                    String      @id @default(uuid()) @db.Uuid
+  customerId            String      @map("customer_id") @db.Uuid
+  createdBy             String      @map("created_by") @db.Uuid
+  status                OrderStatus @default(Received)
+  requestedDeliveryDate DateTime    @map("requested_delivery_date") @db.Date
+  version               Int         @default(1)
+  createdAt             DateTime    @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt             DateTime    @updatedAt @map("updated_at") @db.Timestamptz
+
+  // Relations
+  customer  Customer        @relation(fields: [customerId], references: [id])
+  creator   User            @relation("OrderCreatedBy", fields: [createdBy], references: [id])
+  lineItems OrderLineItem[]
+  jobs      Job[]
+
+  @@index([customerId])
+  @@index([status])
+  @@index([createdAt])
+  @@map("orders")
+  @@schema("orders")
+}
+
+model OrderLineItem {
+  id             String  @id @default(uuid()) @db.Uuid
+  orderId        String  @map("order_id") @db.Uuid
+  finishedGoodId String  @map("finished_good_id") @db.Uuid
+  quantity       Int
+  specNotes      String? @map("spec_notes") @db.Text
+
+  // Relations
+  order        Order         @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  finishedGood InventoryItem @relation(fields: [finishedGoodId], references: [id])
+
+  @@map("order_line_items")
+  @@schema("orders")
+}
